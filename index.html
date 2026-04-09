@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+<title>Медик против Бактерий</title>
+
+<style>
+body{
+margin:0;
+overflow:hidden;
+background-color:#1a2a3a;
+font-family:Segoe UI;
+touch-action:none;
+}
+
+#ui{
+position:absolute;
+top:15px;
+left:15px;
+color:white;
+font-size:24px;
+font-weight:bold;
+z-index:10;
+pointer-events:none;
+}
+</style>
+</head>
+
+<body>
+
+<div id="ui">
+Счет: <span id="score">0</span>
+|
+Здоровье: <span id="lives">∞</span>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+const canvas=document.getElementById("gameCanvas");
+const ctx=canvas.getContext("2d");
+
+function resize(){
+    canvas.width=window.innerWidth;
+    canvas.height=window.innerHeight;
+}
+window.addEventListener("resize",resize);
+resize();
+
+let score=0;
+let frameCount=0;
+
+const player={
+    x:canvas.width/2,
+    y:canvas.height*0.8,
+    width:50,
+    height:80,
+    targetX:canvas.width/2
+};
+
+let projectiles=[];
+let enemies=[];
+let particles=[];
+
+// --- 8-BIT AUDIO SYSTEM ---
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+const audioCtx = new AudioContext();
+
+function unlockAudio() {
+    if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+    }
+}
+
+function playShootSound() {
+    if (audioCtx.state === 'suspended') return;
+    const osc = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+    osc.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+
+    osc.type = 'square'; // 8-bit waveform
+    osc.frequency.setValueAtTime(400, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 0.1);
+
+    gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime); // Громкость
+    gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
+
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.1);
+}
+
+function playExplosionSound() {
+    if (audioCtx.state === 'suspended') return;
+    const osc = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+    osc.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+
+    osc.type = 'sawtooth'; // Грубый звук для взрыва
+    osc.frequency.setValueAtTime(100, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(10, audioCtx.currentTime + 0.2);
+
+    gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime); // Громкость
+    gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.2);
+}
+// --------------------------
+
+function updatePlayerPosition(x){
+    unlockAudio(); // Разблокируем звук при первом движении
+    player.targetX=x;
+
+    if(player.targetX<player.width/2)
+        player.targetX=player.width/2;
+
+    if(player.targetX>canvas.width-player.width/2)
+        player.targetX=canvas.width-player.width/2;
+}
+
+canvas.addEventListener("mousemove",e=>updatePlayerPosition(e.clientX));
+
+canvas.addEventListener("touchmove",e=>{
+    updatePlayerPosition(e.touches[0].clientX);
+    e.preventDefault();
+});
+
+class Projectile{
+    constructor(x,y){
+        this.x=x;
+        this.y=y;
+        this.width=8;
+        this.height=16;
+        this.speed=10;
+    }
+
+    draw(){
+        ctx.fillStyle="#00d2ff";
+        ctx.beginPath();
+        ctx.arc(this.x,this.y,this.width/2,Math.PI,0);
+        ctx.fill();
+
+        ctx.fillStyle="white";
+        ctx.beginPath();
+        ctx.arc(this.x,this.y+this.height-this.width,this.width/2,0,Math.PI);
+        ctx.fill();
+
+        ctx.fillRect(
+            this.x-this.width/2,
+            this.y,
+            this.width,
+            this.height-this.width
+        );
+    }
+
+    update(){
+        this.y-=this.speed;
+    }
+}
+
+class Enemy{
+    constructor(){
+        this.x=Math.random()*(canvas.width-40)+20;
+        this.y=-50;
+
+        let r=Math.random();
+        if(r<0.33)
+            this.type="koch";
+        else if(r<0.66)
+            this.type="coccus";
+        else
+            this.type="purple";
+
+        if(this.type==="koch"){
+            this.width=15;
+            this.height=40;
+            // ИСПРАВЛЕНО: Уменьшено влияние счета с 0.05 до 0.0005 для плавного ускорения
+            this.speed=(2+Math.random()*2+(score*0.0005));
+            this.hp=1;
+        }
+        else{
+            this.width=25;
+            this.height=25;
+            // ИСПРАВЛЕНО: Уменьшено влияние счета с 0.03 до 0.0003
+            this.speed=(1+Math.random()*1.5+(score*0.0003));
+            this.hp=2;
+        }
+    }
+
+    draw(){
+        if(this.type==="koch"){
+            ctx.fillStyle="#ff3333";
+            ctx.beginPath();
+            ctx.arc(this.x, this.y-this.height/2+this.width/2, this.width/2, Math.PI, 0);
+            ctx.arc(this.x, this.y+this.height/2-this.width/2, this.width/2, 0, Math.PI);
+            ctx.closePath();
+            ctx.fill();
+        }
+        else if(this.type==="coccus"){
+            ctx.fillStyle="#33cc33";
+            ctx.beginPath();
+            ctx.arc(this.x,this.y,this.width/2,0,Math.PI*2);
+            ctx.fill();
+
+            ctx.strokeStyle="#1a801a";
+            ctx.lineWidth=3;
+            ctx.beginPath();
+            for(let i=0;i<8;i++){
+                let a=Math.PI*2/8*i;
+                ctx.moveTo(this.x+Math.cos(a)*10, this.y+Math.sin(a)*10);
+                ctx.lineTo(this.x+Math.cos(a)*16, this.y+Math.sin(a)*16);
+            }
+            ctx.stroke();
+        }
+        else if(this.type==="purple"){
+            ctx.fillStyle="#a64dff";
+            ctx.beginPath();
+            ctx.arc(this.x,this.y,this.width/2,0,Math.PI*2);
+            ctx.fill();
+
+            ctx.strokeStyle="#5a1a99";
+            ctx.lineWidth=3;
+            ctx.beginPath();
+            for(let i=0;i<8;i++){
+                let a=Math.PI*2/8*i;
+                ctx.moveTo(this.x+Math.cos(a)*10, this.y+Math.sin(a)*10);
+                ctx.lineTo(this.x+Math.cos(a)*16, this.y+Math.sin(a)*16);
+            }
+            ctx.stroke();
+        }
+    }
+
+    update(){
+        this.y+=this.speed;
+    }
+}
+
+class Particle{
+    constructor(x,y,color){
+        this.x=x;
+        this.y=y;
+        this.vx=(Math.random()-0.5)*5;
+        this.vy=(Math.random()-0.5)*5;
+        this.life=1;
+        this.color=color;
+    }
+
+    draw(){
+        ctx.globalAlpha=this.life;
+        ctx.fillStyle=this.color;
+        ctx.beginPath();
+        ctx.arc(this.x,this.y,3,0,Math.PI*2);
+        ctx.fill();
+        ctx.globalAlpha=1;
+    }
+
+    update(){
+        this.x+=this.vx;
+        this.y+=this.vy;
+        this.life-=0.05;
+    }
+}
+
+function drawPlayer(){
+    player.x+=(player.targetX-player.x)*0.1;
+    player.y=canvas.height-100;
+
+    let x=player.x;
+    let y=player.y;
+
+    ctx.fillStyle="white";
+    ctx.beginPath();
+    ctx.moveTo(x,y-40);
+    ctx.lineTo(x+25,y+40);
+    ctx.lineTo(x-25,y+40);
+    ctx.fill();
+
+    ctx.fillStyle="red";
+    ctx.fillRect(x-4,y-10,8,20);
+    ctx.fillRect(x-10,y-4,20,8);
+
+    ctx.fillStyle="#ffccbb";
+    ctx.beginPath();
+    ctx.arc(x,y-50,15,0,Math.PI*2);
+    ctx.fill();
+
+    ctx.fillStyle="#6b4423";
+    ctx.beginPath();
+    ctx.arc(x,y-52,16,Math.PI,0);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(x+15,y-45,8,0,Math.PI*2);
+    ctx.fill();
+}
+
+function createExplosion(x,y,color){
+    for(let i=0;i<15;i++)
+        particles.push(new Particle(x,y,color));
+    for(let i=0;i<10;i++)
+        particles.push(new Particle(x,y,"white"));
+}
+
+function checkCollisions(){
+    for(let i=enemies.length-1;i>=0;i--){
+        let e=enemies[i];
+
+        for(let j=projectiles.length-1;j>=0;j--){
+            let p=projectiles[j];
+
+            if(
+                Math.abs(e.x-p.x)<e.width/2+p.width/2 &&
+                Math.abs(e.y-p.y)<e.height/2+p.height/2
+            ){
+                projectiles.splice(j,1);
+                e.hp--;
+
+                if(e.hp<=0){
+                    let color="#33cc33";
+                    if(e.type==="koch") color="#ff3333";
+                    if(e.type==="purple") color="#a64dff";
+
+                    createExplosion(e.x,e.y,color);
+                    playExplosionSound(); // Звук взрыва
+                    enemies.splice(i,1);
+                    score+=10;
+                }
+                break;
+            }
+        }
+
+        if(e.y>canvas.height+20){
+            enemies.splice(i,1);
+        }
+    }
+}
+
+function updateUI(){
+    document.getElementById("score").innerText=score;
+}
+
+function gameLoop(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    let spawnRate=Math.max(20,60-Math.floor(score/100));
+
+    if(frameCount%spawnRate===0)
+        enemies.push(new Enemy());
+
+    if(frameCount%15===0){
+        projectiles.push(new Projectile(player.x,player.y-40));
+        playShootSound(); // Звук выстрела
+    }
+
+    for(let i=particles.length-1;i>=0;i--){
+        particles[i].update();
+        particles[i].draw();
+        if(particles[i].life<=0)
+            particles.splice(i,1);
+    }
+
+    for(let i=projectiles.length-1;i>=0;i--){
+        projectiles[i].update();
+        projectiles[i].draw();
+        if(projectiles[i].y<-20)
+            projectiles.splice(i,1);
+    }
+
+    for(let e of enemies){
+        e.update();
+        e.draw();
+    }
+
+    drawPlayer();
+    checkCollisions();
+    updateUI();
+
+    frameCount++;
+    requestAnimationFrame(gameLoop);
+}
+
+gameLoop();
+</script>
+</body>
+</html>
